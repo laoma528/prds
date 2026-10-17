@@ -49,13 +49,17 @@ def _make_resource_key(keyword: str, url: str) -> str:
 
 class ResourceService:
 
-    def __init__(self, db: AsyncSession, redis_client: redis.Redis):
+    def __init__(self, db: AsyncSession, redis_client: redis.Redis, runtime_config: dict | None = None):
         self._db = db
         self._redis = redis_client
         self._settings = get_settings()
-        self._pansou = PanSouClient()
+        cfg = runtime_config or {}
+        pansou_url = cfg.get("pansou_base_url") or self._settings.pansou_base_url
+        pancheck_url = cfg.get("pancheck_url") or self._settings.pancheck_url
+        self._link_check_enabled = cfg.get("link_check_enabled", self._settings.link_check_enabled)
+        self._pansou = PanSouClient(base_url=pansou_url)
         self._scheduler = AccountScheduler(redis_client)
-        self._link_checker = build_orchestrator(self._settings.pancheck_url, self._settings.pansou_base_url)
+        self._link_checker = build_orchestrator(pancheck_url, pansou_url)
         self._account_repo = PanAccountRepository(db)
         self._asset_repo = ResourceAssetRepository(db)
         self._instance_repo = ResourceInstanceRepository(db)
@@ -132,7 +136,7 @@ class ResourceService:
                         async with sem_d:
                             if len(valid_direct) >= effective_limit:
                                 return
-                            if self._settings.link_check_enabled:
+                            if self._link_check_enabled:
                                 pwd = getattr(link, "password", "") or ""
                                 is_valid = await self._link_checker.check_indexed(link.url, ptype, pwd, i)
                                 if is_valid is False:
@@ -176,13 +180,13 @@ class ResourceService:
     # ── 转存流程 ──────────────────────────────────────
 
     async def _deliver_links(self, keyword: str, pan_type: str, all_links: list, target_count: int) -> list[dict]:
-        """智能转存：并行检测 + 流水线转存，凑够 target_count 条可用资源
+        """智能转存：分批检测 + 流水线转存，凑够 target_count 条可用资源
 
         策略：
-        1. 候选数 = min(len(all_links), target_count * 5)，避免全量检测
-        2. semaphore(5) 限并发，检测器按 index 轮转，分散请求压力
-        3. 检测到 target_count 个有效链接立即停止检测，同时流水线发起转存
-        4. 全部失效时降级返回原始链接
+        1. 每批取 BATCH_SIZE 条并行检测，凑够 target_count 条有效链接即停
+        2. 当前批全部失效时自动取下一批，直到 all_links 耗尽
+        3. semaphore(5) 限并发，检测器按全局 index 轮转，分散请求压力
+        4. 全部耗尽仍不够时降级返回原始链接
         """
         provider = get_provider(pan_type)
         if not provider:
@@ -192,61 +196,70 @@ class ResourceService:
                 for lnk in all_links[:target_count]
             ]
 
-        candidates = all_links[:target_count * 5]
-        sem = asyncio.Semaphore(5)
-        valid_queue: asyncio.Queue = asyncio.Queue()
-        valid_found = 0
+        BATCH_SIZE = 5
         results: list[dict] = []
 
-        async def check_one(i: int, link) -> None:
-            nonlocal valid_found
-            if valid_found >= target_count:
-                return
-            async with sem:
-                if valid_found >= target_count:
+        for batch_start in range(0, len(all_links), BATCH_SIZE):
+            if len(results) >= target_count:
+                break
+
+            batch = all_links[batch_start: batch_start + BATCH_SIZE]
+            still_need = target_count - len(results)
+
+            sem = asyncio.Semaphore(5)
+            valid_queue: asyncio.Queue = asyncio.Queue()
+            valid_found = 0
+
+            async def check_one(i: int, link) -> None:
+                nonlocal valid_found
+                if valid_found >= still_need:
                     return
-                # 缓存命中快速路径：不消耗检测接口配额
-                resource_key = _make_resource_key(keyword, link.url)
-                if await self._get_resource_cache(resource_key) is not None:
-                    valid_found += 1
-                    await valid_queue.put(link)
-                    return
-                # 链接有效性检测（按 index 轮转检测器）
-                if self._settings.link_check_enabled:
-                    pwd = getattr(link, "password", "") or ""
-                    is_valid = await self._link_checker.check_indexed(link.url, pan_type, pwd, i)
-                    if is_valid is False:
-                        logger.info(f"🚫 检测失效，跳过: {link.url[:60]}")
+                async with sem:
+                    if valid_found >= still_need:
                         return
-                if valid_found < target_count:
-                    valid_found += 1
-                    await valid_queue.put(link)
+                    # 缓存命中快速路径：不消耗检测接口配额
+                    resource_key = _make_resource_key(keyword, link.url)
+                    if await self._get_resource_cache(resource_key) is not None:
+                        valid_found += 1
+                        await valid_queue.put(link)
+                        return
+                    # 链接有效性检测（按全局 index 轮转检测器）
+                    if self._link_check_enabled:
+                        pwd = getattr(link, "password", "") or ""
+                        is_valid = await self._link_checker.check_indexed(link.url, pan_type, pwd, batch_start + i)
+                        if is_valid is False:
+                            logger.info(f"🚫 检测失效，跳过: {link.url[:60]}")
+                            return
+                    if valid_found < still_need:
+                        valid_found += 1
+                        await valid_queue.put(link)
 
-        async def save_consumer(check_tasks: list) -> None:
-            while len(results) < target_count:
-                try:
-                    link = await asyncio.wait_for(valid_queue.get(), timeout=2.0)
-                except asyncio.TimeoutError:
-                    if all(t.done() for t in check_tasks):
-                        break
-                    continue
-                result = await self._deliver_single(keyword, pan_type, link, provider, skip_link_check=True)
-                if result and result.get("mode") == "proxy":
-                    results.append(result)
-                    logger.info(f"✅ 转存成功 ({len(results)}/{target_count}): {result['title']}")
+            async def save_consumer(check_tasks: list) -> None:
+                while len(results) < target_count:
+                    try:
+                        link = await asyncio.wait_for(valid_queue.get(), timeout=2.0)
+                    except asyncio.TimeoutError:
+                        if all(t.done() for t in check_tasks):
+                            break
+                        continue
+                    result = await self._deliver_single(keyword, pan_type, link, provider, skip_link_check=True)
+                    if result and result.get("mode") == "proxy":
+                        results.append(result)
+                        logger.info(f"✅ 转存成功 ({len(results)}/{target_count}): {result['title']}")
 
-        check_tasks = [asyncio.create_task(check_one(i, lnk)) for i, lnk in enumerate(candidates)]
-        await asyncio.gather(save_consumer(check_tasks), *check_tasks, return_exceptions=True)
-        for t in check_tasks:
-            t.cancel()
+            logger.info(f"🔄 [{pan_type}] 第{batch_start // BATCH_SIZE + 1}批检测: 第{batch_start + 1}~{batch_start + len(batch)}条 (还需{still_need}条)")
+            check_tasks = [asyncio.create_task(check_one(i, lnk)) for i, lnk in enumerate(batch)]
+            await asyncio.gather(save_consumer(check_tasks), *check_tasks, return_exceptions=True)
+            for t in check_tasks:
+                t.cancel()
 
         if results:
             if len(results) < target_count:
-                logger.warning(f"⚠️ 仅凑够 {len(results)}/{target_count} 条可用资源")
+                logger.warning(f"⚠️ 链接全部耗尽，仅凑够 {len(results)}/{target_count} 条可用资源")
             return results
 
-        # 全部失效，降级返回原始链接
-        logger.error(f"❌ 所有候选转存均失败，降级返回前 {target_count} 条原始链接")
+        # 全部耗尽仍无可用资源，降级返回原始链接
+        logger.error(f"❌ 所有候选({len(all_links)}条)转存均失败，降级返回前 {target_count} 条原始链接")
         return [
             {"title": f"⚠️ {lnk.note or keyword}", "pan_type": pan_type,
              "url": lnk.url, "password": lnk.password, "mode": "direct",
@@ -282,7 +295,7 @@ class ResourceService:
                 return result
 
         # 链接有效性检测（跳过缓存命中的链接，或调用方已完成检测时跳过）
-        if self._settings.link_check_enabled and not skip_link_check:
+        if self._link_check_enabled and not skip_link_check:
             password = getattr(link, "password", "") or ""
             is_valid = await self._link_checker.check(link.url, pan_type, password)
             if is_valid is False:

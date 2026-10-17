@@ -10,7 +10,7 @@ RUN sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debia
     sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list
     
 # 安装 PostgreSQL + Redis + 系统依赖
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get install -y --no-install-recommends --fix-missing \
     postgresql \
     postgresql-client \
     redis-server \

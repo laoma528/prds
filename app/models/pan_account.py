@@ -23,7 +23,7 @@ class PanAccount(Base, TimestampMixin):
     cookie_valid: Mapped[bool] = mapped_column(Boolean, default=True, comment="cookie 是否有效")
     total_space: Mapped[int] = mapped_column(Integer, default=0, comment="总空间(MB)")
     used_space: Mapped[int] = mapped_column(Integer, default=0, comment="已用空间(MB)")
-    max_concurrency: Mapped[int] = mapped_column(Integer, default=3, comment="最大并发数")
+    max_concurrency: Mapped[int] = mapped_column(Integer, default=6, comment="最大并发数")
     health_score: Mapped[float] = mapped_column(Float, default=100.0, comment="健康评分 0-100")
     weight: Mapped[int] = mapped_column(Integer, default=1, comment="调度权重")
     save_folder_id: Mapped[str] = mapped_column(String(200), default="", comment="转存目标文件夹ID")

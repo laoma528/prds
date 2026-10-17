@@ -1,6 +1,9 @@
 from pydantic_settings import BaseSettings
 from functools import lru_cache
 
+# Redis 键：运行时可覆盖的配置项
+_REDIS_CONFIG_KEY = "prds:config:runtime"
+
 
 class Settings(BaseSettings):
     """应用配置，从环境变量加载"""
@@ -64,3 +67,23 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+async def get_runtime_config(redis_client) -> dict:
+    """从 Redis 读取运行时配置，覆盖 .env 默认值。
+
+    返回:
+        {"pansou_base_url": ..., "pancheck_url": ..., "link_check_enabled": ...}
+    """
+    import json
+    settings = get_settings()
+    result = {
+        "pansou_base_url": settings.pansou_base_url,
+        "pancheck_url": settings.pancheck_url,
+        "link_check_enabled": settings.link_check_enabled,
+    }
+    raw = await redis_client.get(_REDIS_CONFIG_KEY)
+    if raw:
+        overrides = json.loads(raw)
+        result.update({k: v for k, v in overrides.items() if k in result})
+    return result

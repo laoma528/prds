@@ -255,6 +255,50 @@
       </div>
     </div>
 
+    <!-- ============ 系统设置 ============ -->
+    <div x-show="page === 'settings'" x-cloak class="fade-in">
+      <h2 class="text-xl font-semibold mb-5 text-slate-800">系统设置</h2>
+      <div class="bg-white rounded-xl border border-slate-200 shadow-sm p-6 max-w-xl space-y-5">
+
+        <!-- 盘搜接口 -->
+        <div>
+          <label class="block text-sm font-medium text-slate-700 mb-1">盘搜接口地址</label>
+          <input x-model="sysSettings.pansou_base_url" type="text" placeholder="http://127.0.0.1:8080"
+            class="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-primary-500">
+          <p class="text-xs text-slate-400 mt-1">PanSou 搜索服务地址，留空则使用 .env 默认值</p>
+        </div>
+
+        <!-- 有效性检测接口 -->
+        <div>
+          <label class="block text-sm font-medium text-slate-700 mb-1">链接有效性检测地址</label>
+          <input x-model="sysSettings.pancheck_url" type="text" placeholder="http://127.0.0.1:6080"
+            class="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-primary-500">
+          <p class="text-xs text-slate-400 mt-1">自建 PanCheck 服务地址，留空则使用 .env 默认值</p>
+        </div>
+
+        <!-- 链接检测开关 -->
+        <div class="flex items-center justify-between py-2">
+          <div>
+            <div class="text-sm font-medium text-slate-700">启用链接有效性检测</div>
+            <div class="text-xs text-slate-400 mt-0.5">转存前先检测原始链接是否失效，关闭后直接尝试转存</div>
+          </div>
+          <button @click="sysSettings.link_check_enabled = !sysSettings.link_check_enabled"
+            :class="sysSettings.link_check_enabled ? 'bg-primary-600' : 'bg-slate-200'"
+            class="relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none">
+            <span :class="sysSettings.link_check_enabled ? 'translate-x-6' : 'translate-x-1'"
+              class="inline-block h-4 w-4 transform rounded-full bg-white transition-transform shadow"></span>
+          </button>
+        </div>
+
+        <div class="pt-2">
+          <button @click="saveSettings()"
+            class="bg-primary-600 hover:bg-primary-700 text-white text-sm px-5 py-2 rounded-lg font-medium transition-colors shadow-sm">
+            保存设置
+          </button>
+        </div>
+      </div>
+    </div>
+
   </main>
 </div>
 
@@ -369,6 +413,7 @@ function app() {
       { id: 'dashboard', label: '数据概览', icon: '📊' },
       { id: 'accounts',  label: '账号管理', icon: '👤' },
       { id: 'logs',      label: '请求日志', icon: '📋' },
+      { id: 'settings',  label: '系统设置', icon: '⚙️' },
     ],
 
     // 数据
@@ -376,6 +421,7 @@ function app() {
     statsCards: [],
     accounts: [],
     logs: [],
+    sysSettings: { pansou_base_url: '', pancheck_url: '', link_check_enabled: true },
 
     // 弹窗
     showModal: false,
@@ -443,6 +489,7 @@ function app() {
       if (this.page === 'dashboard') await this.loadStats();
       if (this.page === 'accounts') await this.loadAccounts();
       if (this.page === 'logs') await this.loadLogs();
+      if (this.page === 'settings') await this.loadSettings();
     },
 
     // ── 数据概览 ──
@@ -493,7 +540,7 @@ function app() {
         name: '',
         pan_type: 'quark',
         cookie: '',
-        max_concurrency: 3,
+        max_concurrency: 6,
         weight: 1,
         save_folder_id: '0',
         is_active: true,
@@ -589,6 +636,32 @@ function app() {
         if (json.success) this.logs = json.data;
       } catch (e) {
         this.showToast('加载日志失败', 'error');
+      }
+    },
+
+    // ── 系统设置 ──
+    async loadSettings() {
+      try {
+        const res = await this.authFetch(`${API}/admin/settings`);
+        const json = await res.json();
+        if (json.success) this.sysSettings = { ...this.sysSettings, ...json.data };
+      } catch (e) {
+        this.showToast('加载设置失败', 'error');
+      }
+    },
+
+    async saveSettings() {
+      try {
+        const res = await this.authFetch(`${API}/admin/settings`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(this.sysSettings),
+        });
+        const json = await res.json();
+        if (json.success) this.showToast('设置已保存，下次请求即生效', 'success');
+        else this.showToast(json.message || '保存失败', 'error');
+      } catch (e) {
+        this.showToast('保存设置失败', 'error');
       }
     },
 

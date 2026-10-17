@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 import redis.asyncio as redis
 
+from app.core.config import get_runtime_config
 from app.core.database import get_db
 from app.core.redis import get_redis
 from app.schemas.resource import SearchAndDeliverRequest
@@ -24,7 +25,8 @@ async def search(
     流程: PanSou搜索 -> 按时间排序取最新N条 -> 账号池调度 -> 转存 -> 分享 -> 返回链接
     无账号配置时直接返回 PanSou 原始链接。
     """
-    service = ResourceService(db, redis_client)
+    runtime_config = await get_runtime_config(redis_client)
+    service = ResourceService(db, redis_client, runtime_config=runtime_config)
     try:
         result = await service.search_and_deliver(
             keyword=req.keyword,

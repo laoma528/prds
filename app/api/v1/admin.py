@@ -5,14 +5,17 @@ PRD补充需求4: 需要一个后台界面，配置网盘账号，查看API调�
 """
 
 import hashlib
+import json
 import time
 
 from fastapi import APIRouter, Depends, HTTPException, Header
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
+import redis.asyncio as redis
 
-from app.core.config import get_settings
+from app.core.config import get_settings, get_runtime_config, _REDIS_CONFIG_KEY
 from app.core.database import get_db
+from app.core.redis import get_redis
 from app.models.pan_account import PanAccount
 from app.models.resource import ResourceAsset, ResourceInstance
 from app.models.task import DeleteTask, RequestLog
@@ -92,7 +95,7 @@ async def create_account(body: dict, db: AsyncSession = Depends(get_db)):
         cookie=body["cookie"],
         is_active=body.get("is_active", True),
         total_space=body.get("total_space", 0),
-        max_concurrency=body.get("max_concurrency", 3),
+        max_concurrency=body.get("max_concurrency", 6),
         weight=body.get("weight", 1),
         save_folder_id=body.get("save_folder_id", ""),
     )
@@ -219,3 +222,30 @@ async def get_recent_logs(limit: int = 50, db: AsyncSession = Depends(get_db)):
         }
         for log in logs
     ])
+
+
+# ── 系统设置（需鉴权）────────────────────────────────
+
+_ALLOWED_SETTINGS = {"pansou_base_url", "pancheck_url", "link_check_enabled"}
+
+
+@router.get("/settings", dependencies=[Depends(require_admin)])
+async def get_settings_api(redis_client: redis.Redis = Depends(get_redis)):
+    """获取当前系统设置（运行时覆盖值优先，否则返回 .env 默认值）"""
+    config = await get_runtime_config(redis_client)
+    return ok(data=config)
+
+
+@router.put("/settings", dependencies=[Depends(require_admin)])
+async def update_settings(body: dict, redis_client: redis.Redis = Depends(get_redis)):
+    """更新系统设置并持久化到 Redis（重启后仍生效，直到手动清除）"""
+    unknown = set(body.keys()) - _ALLOWED_SETTINGS
+    if unknown:
+        return fail("INVALID_FIELD", f"不支持的配置项: {', '.join(unknown)}")
+
+    # 读取现有覆盖值，与新值合并
+    raw = await redis_client.get(_REDIS_CONFIG_KEY)
+    current = json.loads(raw) if raw else {}
+    current.update(body)
+    await redis_client.set(_REDIS_CONFIG_KEY, json.dumps(current, ensure_ascii=False))
+    return ok(data={"message": "设置已保存，下次请求即生效"})

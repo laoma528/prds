@@ -134,10 +134,13 @@ app/
 │   └── task.py             # 任务 CRUD
 ├── providers/              # 网盘 Provider 抽象
 │   ├── base.py             # BaseProvider 抽象类
-│   └── quark.py            # QuarkProvider 实现
+│   ├── quark.py            # QuarkProvider 实现
+│   ├── uc.py               # UcProvider 实现（UC 网盘）
+│   └── baidu.py            # BaiduProvider 实现（百度网盘）
 ├── services/               # 业务逻辑层
 │   ├── pansou_client.py    # PanSou HTTP 客户端
 │   ├── resource_service.py # 核心业务逻辑（搜索+转存+分享）
+│   ├── link_checker.py     # 链接有效性检测（转存前过滤失效链接）
 │   └── scheduler.py        # 账号池调度算法
 └── workers/                # 异步 Worker
     ├── main.py             # Worker 启动入口
@@ -166,7 +169,7 @@ migrations/                 # Alembic 数据库迁移
 - `create_share()` - 创建分享链接
 - `delete_resource()` - 删除资源
 
-当前支持：夸克网盘（`QuarkProvider`）。扩展新网盘只需继承 `BaseProvider`，然后在 `app/providers/__init__.py` 的 `_REGISTRY` 字典中添加 `"pan_type": XxxProvider()` 条目。详见 [docs/08_Provider抽象设计.md](docs/08_Provider抽象设计.md)。
+当前支持：夸克网盘（`QuarkProvider`）、UC 网盘（`UcProvider`）、百度网盘（`BaiduProvider`）。扩展新网盘只需继承 `BaseProvider`，然后在 `app/providers/__init__.py` 的 `_REGISTRY` 字典中添加 `"pan_type": XxxProvider()` 条目。详见 [docs/08_Provider抽象设计.md](docs/08_Provider抽象设计.md)。
 
 ### 账号池调度
 过滤顺序：Cookie有效 → 空间充足 → 并发未超限。选择策略：health_score + weight + Round Robin。详见 [docs/06_账号池调度算法.md](docs/06_账号池调度算法.md)。

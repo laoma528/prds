@@ -10,12 +10,12 @@ Pan Resource Delivery Service
 - **自动转存**: 通过账号池自动将资源转存到自有网盘
 - **分享生成**: 自动生成带密码的分享链接
 - **生命周期管理**: 资源 10 分钟有效，20 分钟后自动删除，降低网盘容量成本
-- **链接有效性检测**: 转存前并行检测候选链接（最多 `limit × 5` 条，semaphore 限5并发），检测器按轮转分配避免单源过载，单次超时5s；检测到足够有效链接后立即取消剩余检测任务
+- **链接有效性检测**: 转存前分批并行检测候选链接（每批5条，semaphore 限5并发），当前批全部失效时自动取下一批，直到凑够目标数量或全部链接耗尽；检测器按轮转分配避免单源过载，单次超时5s
 - **流水线转存**: 有效链接边检测边转存，无需等所有检测完成再开始，大幅降低整体响应时间
 - **智能降级**: 未配置对应网盘账号时，直接返回原始链接
 - **三层缓存**: L1 搜索缓存 + L2 分布式锁防重复转存 + L3 已转存资源缓存，重复搜索毫秒级响应
 - **账号池调度**: 多账号并发管理，健康评分 + 权重 + 轮询策略
-- **管理后台**: Web 界面管理账号 + 查看 API 调用数据统计（密码登录鉴权）
+- **管理后台**: Web 界面管理账号 + 系统设置（盘搜/检测地址可在线修改，即时生效）+ 查看 API 调用数据统计（密码登录鉴权）
 
 ## 技术栈
 
@@ -43,8 +43,8 @@ app/
 ├── schemas/                # Pydantic 请求/响应模型
 ├── models/                 # SQLAlchemy 数据库模型
 ├── repositories/           # 数据访问层
-├── providers/              # 网盘 Provider（当前支持夸克）
-├── services/               # 业务逻辑层
+├── providers/              # 网盘 Provider（夸克 / UC / 百度）
+├── services/               # 业务逻辑层（含链接检测器编排）
 └── workers/                # 异步 Worker（定时删除过期资源）
 static/
 └── admin.html              # 管理后台 Web 页面
@@ -68,6 +68,8 @@ static/
 | POST | `/api/v1/admin/accounts` | 新增网盘账号 |
 | PUT | `/api/v1/admin/accounts/{id}` | 更新网盘账号 |
 | DELETE | `/api/v1/admin/accounts/{id}` | 删除网盘账号 |
+| GET | `/api/v1/admin/settings` | 获取系统设置（盘搜/检测地址等） |
+| PUT | `/api/v1/admin/settings` | 更新系统设置（立即生效，持久化到 Redis） |
 | GET | `/api/v1/admin/stats` | 数据统计 |
 | GET | `/api/v1/admin/stats/recent` | 最近请求日志 |
 
@@ -117,18 +119,20 @@ POST /api/v1/search
   │
   ├─ L1 搜索缓存命中 → 直接返回（毫秒级）
   │
-  └─ L1 未命中 → 请求 PanSou → 取候选链接（最多 limit × 5 条）
+  └─ L1 未命中 → 请求 PanSou → 获取全部候选链接
         │
         ├─ 有账号（转存模式）
-        │   ├─ [并行检测] semaphore(5) 并发，检测器轮转分配
-        │   │    ├─ L3/DB 缓存命中 → 直接入转存队列（跳过检测）
-        │   │    ├─ 链接失效 → 跳过
-        │   │    └─ 链接有效 → 推入队列（凑够 limit 条立即取消剩余检测）
-        │   └─ [流水线转存] 有效链接边检测边转存
+        │   └─ 分批检测（每批5条）+ 流水线转存
+        │        ├─ 第1批：link0~4 并行检测
+        │        │    ├─ L3/DB 缓存命中 → 直接入转存队列（跳过检测）
+        │        │    ├─ 链接失效 → 跳过
+        │        │    └─ 链接有效 → 推入转存队列，凑够 limit 条即停
+        │        ├─ 第1批全部失效 → 自动取第2批：link5~9 继续检测
+        │        ├─ 直到凑够 limit 条或全部链接耗尽
         │        └─ 账号调度（LRU轮转）→ 转存 → 分享 → 写 DB + L3 缓存
         │
         └─ 无账号（直连模式）
-             └─ [并行检测] 同上，有效链接直接返回原始 URL
+             └─ 分批检测，有效链接直接返回原始 URL
 ```
 
 ### 三层缓存策略
@@ -153,26 +157,28 @@ POST /api/v1/search
 
 检测结果：`True`（有效）/ `False`（失效，跳过）/ `None`（不确定，放行转存）
 
-**并行检测策略**：
+**分批检测策略**：
 
 ```
-候选数 = min(PanSou结果总数, limit × 5)
+每批取5条候选链接，semaphore(5) 并发检测
 
-semaphore(5)                     ← 同时最多5个检测并发
-link_0 → checker_A               ← 按 index % 3 轮转分配
-link_1 → checker_B
-link_2 → checker_C
-link_3 → checker_A（轮回）
-...
+第1批: link0~4 并行检测
+  ├─ 有效 → 进转存队列，凑够 limit 条立即停止
+  └─ 全部失效 → 自动取第2批
+
+第2批: link5~9 并行检测
+  └─ 全部失效 → 继续取第3批...
+
+直到凑够 limit 条，或 PanSou 返回的全部链接检测完毕
 ↓
-检测到 limit 个有效链接 → 取消剩余检测任务（不再消耗配额）
-↓
-有效链接流入转存流水线
+全部耗尽仍不够 → 降级返回原始链接（带 ⚠️ 警告）
 ```
 
-单次检测超时：5s（并行模式下比串行更激进地淘汰死链）
+检测器按 `index % 3` 轮转分配（index 在全局累计，跨批次保持连续），分散并行请求压力。
 
-**转存流水线**：检测有效的链接立即发起转存，无需等所有检测完成。检测和转存并发执行：
+单次检测超时：5s。结果为 `None`（接口不确定）时放行转存，不跳过。
+
+**流水线转存**：有效链接边检测边转存，无需等当前批全部检测完：
 
 ```
 时刻1: link0,1,2,3,4 并发检测中
@@ -202,13 +208,15 @@ LRU 机制确保多账号均衡使用：账号 A 被用一次后，下次同等�
 
 `last_used_at` 存储于 Redis（键 `prds:pool:last_used:{account_id}`，TTL 1小时），账号 acquire 成功时写入。
 
+**并发控制**：每个账号有独立的 `max_concurrency` 限制，新建账号默认为 6，可在管理后台编辑。同一账号并发超限时调度器自动跳过，去尝试其他账号。
+
 ## 支持的网盘
 
 | 网盘 | Provider | 状态 |
 |------|----------|------|
-| 夸克网盘 | `QuarkProvider` | 已实现 |
-| UC 网盘 | `UcProvider` | 已实现（继承夸克） |
-| 百度网盘 | `BaiduProvider` | 已实现 |
+| 夸克网盘 | `QuarkProvider` | 已实现，生产验证 |
+| UC 网盘 | `UcProvider` | 已实现（继承夸克），未生产验证 |
+| 百度网盘 | `BaiduProvider` | 已实现，未生产验证 |
 | 迅雷网盘 | `XunleiProvider` | 规划中 |
 
 扩展新网盘只需：继承 `BaseProvider` 实现四个方法，在 `app/providers/__init__.py` 注册即可。
@@ -230,6 +238,58 @@ LRU 机制确保多账号均衡使用：账号 A 被用一次后，下次同等�
 ## 快速开始
 
 详见 [DEPLOY.md](DEPLOY.md)。
+
+## 部署方案
+
+### 方案一：本地构建直接部署（适合服务器在本地或 CI 环境）
+
+```bash
+# 在服务器上，项目根目录执行
+chmod +x deploy.sh && ./deploy.sh
+```
+
+### 方案二：GHCR 镜像分发（推荐，构建与部署分离）
+
+适合本地开发机构建镜像，推送到 GitHub Container Registry，再拉取到云服务器部署。
+
+**第一步：本地构建并推送镜像**
+
+```bash
+# 首次登录 GHCR（只需一次，Token 需 write:packages 权限）
+echo $GITHUB_TOKEN | docker login ghcr.io -u laoma528 --password-stdin
+
+# 构建并推送 :latest
+./deploy/build-push.sh
+
+# 或指定版本号（同时推送 :latest）
+./deploy/build-push.sh v1.2.0
+```
+
+推送成功后输出镜像地址：`ghcr.io/laoma528/prds:latest`
+
+**第二步：云服务器拉取并部署**
+
+将 `deploy/` 目录和 `.env` 文件上传到云服务器，然后执行：
+
+```bash
+chmod +x deploy/deploy.sh
+
+./deploy/deploy.sh             # 部署 :latest
+./deploy/deploy.sh v1.2.0      # 部署指定版本
+```
+
+脚本会自动拉取镜像、检查 `.env`、创建持久化目录、启动容器并验证健康状态。
+
+**`deploy/` 目录说明**
+
+```
+deploy/
+├── build-push.sh           # 本地执行：构建 + 推送到 GHCR
+├── deploy.sh               # 云服务器执行：拉取镜像 + 启动
+└── docker-compose.prod.yml # 生产 compose（使用拉取的镜像）
+```
+
+> 镜像仓库为公开仓库，云服务器拉取无需登录。
 
 ## 设计文档
 
