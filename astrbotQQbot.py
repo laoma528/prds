@@ -134,7 +134,7 @@ class VideoSearchPlugin(Star):
 
         # ==================== 配置区域（请修改） ====================
         # PRDS API 地址（必改）
-        self.api_url = "http://prds:8000/api/v1/search"
+        self.api_url = "http://141.11.77.151:8088/api/v1/search"
 
         # 默认网盘类型（用户未指定时使用）
         self.default_pan_type = "quark"
@@ -178,6 +178,8 @@ class VideoSearchPlugin(Star):
                 "- 搜索 庆余年\n"
                 "- 搜 流浪地球 百度\n"
                 "- 搜 三体 阿里云盘"
+                "━━━━━━━━━━━━━"
+                "更多夸克资源https://pansou.de"
             )
             return
 
@@ -210,6 +212,8 @@ class VideoSearchPlugin(Star):
                 "- 网络波动或服务器繁忙\n"
                 "- 资源转存中，耗时较长\n\n"
                 "建议稍后再试，或简化关键词"
+                "━━━━━━━━━━━━━"
+                "更多夸克资源https://pansou.de"
             )
             logger.error(f"搜索超时: {keyword}")
 
@@ -291,6 +295,8 @@ class VideoSearchPlugin(Star):
                 f"- 尝试简化关键词\n"
                 f"- 换个表述方式\n\n"
                 f"示例：搜庆余年"
+                f"━━━━━━━━━━━━━"
+                f"更多夸克资源https://pansou.de"
             )
 
         pan_display = _PAN_TYPE_DISPLAY.get(pan_type, pan_type)
@@ -299,7 +305,7 @@ class VideoSearchPlugin(Star):
         # 标题
         lines.append("")
         lines.append(f"🔍 {keyword} 丨[{pan_display}] 资源")
-        lines.append("━━━━━━━━━━━━━━━")
+        lines.append("━━━━━━━━━━━━━━")
         lines.append("")
 
         # 遍历结果
@@ -317,9 +323,11 @@ class VideoSearchPlugin(Star):
             lines.append("")
 
         # 底部提示（保持原样不动）
-        lines.append("━━━━━━━━━━━━━━━")
-        lines.append("‼️ 5分钟后自动删除，及时保存")
+        lines.append("━━━━━━━━━━━━━━")
+        lines.append("‼️ 5分钟后删除，请及时保存")
         lines.append("🈲 不要相信网盘内的任何广告")
+        lines.append("━━━━━━━━━━━━━━")
+        lines.append("更多夸克资源https://pansou.de")
 
         logger.info(f"搜索成功: {keyword} [{pan_type}] 返回 {len(results)} 条结果")
 
